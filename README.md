@@ -36,43 +36,96 @@ For OpenCode V1:
 
 The plugin is automatically installed from npm when OpenCode starts.
 
+GPU device passthrough is only available from this fork, which carries a Bun
+patch for `@anthropic-ai/sandbox-runtime` (see
+[Linux device passthrough](#linux-device-passthrough)). Install it from a
+checkout instead, and rerun `bun install` after every `git pull` so the patch
+is reapplied:
+
+```bash
+git clone https://github.com/KRiedmiller/opencode-sandbox-plugin
+cd opencode-sandbox-plugin
+bun install
+bun run build
+```
+
+Then point `plugins` at the absolute path of the checkout. A built `dist/` is
+required because OpenCode loads the package through its `exports`; a checkout
+without one fails to load, and installing straight from git does not build it
+either because this repository has no `prepare` script. Local entries are not
+update-checked, and they do not appear in `opencode plugin list`.
+
 ### Linux prerequisites
 
-**1. Install bubblewrap:**
+**1. Install the dependencies:**
+
+`bubblewrap` provides the sandbox, `socat` relays traffic to the network
+allowlist proxy, and `ripgrep` is used for deny-path detection.
 
 ```bash
 # Debian/Ubuntu
-sudo apt install bubblewrap
+sudo apt install bubblewrap socat ripgrep
 
 # Fedora
-sudo dnf install bubblewrap
+sudo dnf install bubblewrap socat ripgrep
 
 # Arch
-sudo pacman -S bubblewrap
+sudo pacman -S bubblewrap socat ripgrep
 ```
 
-**2. Ubuntu 24.04+ (AppArmor fix):**
-
-Ubuntu 24.04 and later restrict unprivileged user namespaces via AppArmor, which prevents bubblewrap from working. You need to enable the `bwrap-userns-restrict` AppArmor profile:
-
-```bash
-# Install the AppArmor profiles package
-sudo apt install apparmor-profiles
-
-# Create the symlink to enable the profile
-sudo ln -s /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/force-complain/bwrap-userns-restrict
-
-# Load the profile
-sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
-```
-
-You can verify bwrap works:
+Check that bubblewrap can start:
 
 ```bash
 bwrap --ro-bind / / --dev /dev --proc /proc -- echo "sandbox works"
 ```
 
-Without this fix, bwrap will fail with `loopback: Failed RTM_NEWADDR: Operation not permitted` or `setting up uid map: Permission denied`.
+**2. Ubuntu 24.04+ (user namespace restriction):**
+
+Ubuntu sets `kernel.apparmor_restrict_unprivileged_userns=1`, which allows a
+process to create a capability-bearing user namespace only when its AppArmor
+profile grants `userns`. Two different steps break, with different errors:
+
+| Error | What is blocked |
+|-------|-----------------|
+| `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` or `setting up uid map: Permission denied` | bubblewrap cannot create its namespace |
+| `apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied` | bubblewrap works, but the seccomp helper cannot create the nested namespace it needs |
+
+Ubuntu's packaged `bwrap-userns-restrict` profile only covers the first: it
+grants the namespace permission to `bwrap` itself but deliberately denies
+capabilities to bwrap's children, so `apply-seccomp` still fails. Profile
+transitions cannot fix that either, because bwrap runs with `no_new_privs`
+(AppArmor refuses them with `no new privs`).
+
+Install [`contrib/apparmor/opencode-sandbox-bwrap`](contrib/apparmor/opencode-sandbox-bwrap)
+instead. It grants the namespace permission to `/usr/bin/bwrap` and the
+processes it starts, and changes nothing for the rest of the system:
+
+```bash
+sudo install -m 0644 contrib/apparmor/opencode-sandbox-bwrap \
+  /etc/apparmor.d/opencode-sandbox-bwrap
+sudo apparmor_parser -r /etc/apparmor.d/opencode-sandbox-bwrap
+```
+
+The profile lives in `/etc/apparmor.d/`, so it is loaded again on every boot.
+To remove it:
+
+```bash
+sudo apparmor_parser -R /etc/apparmor.d/opencode-sandbox-bwrap
+sudo rm /etc/apparmor.d/opencode-sandbox-bwrap
+```
+
+The tradeoff: this profile does not re-restrict capabilities *inside* bwrap.
+The alternative documented by `sandbox-runtime`, `sudo sysctl -w
+kernel.apparmor_restrict_unprivileged_userns=0`, has the same effect but
+reopens capability-bearing user namespaces system-wide (and does not survive a
+reboot unless it is written to `/etc/sysctl.d/`). Filesystem and network
+isolation are unaffected either way — they are enforced by bwrap's namespaces
+and mounts, not by AppArmor.
+
+If the setup is still broken, diagnostics go to the OpenCode server log,
+prefixed with `[opencode-sandbox]`. In `enforce` mode the affected command is
+blocked instead of running without restrictions; the default `permissive` mode
+runs it unsandboxed and logs the failure.
 
 ## What it does
 
