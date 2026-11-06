@@ -1,0 +1,152 @@
+diff --git a/dist/sandbox/linux-sandbox-utils.d.ts b/dist/sandbox/linux-sandbox-utils.d.ts
+index 88cc67f6cdb6ed2cb4d019bcbbf077e4d081706b..22af1e07fad40d7c13cb89ea51e2809efb75078b 100644
+--- a/dist/sandbox/linux-sandbox-utils.d.ts
++++ b/dist/sandbox/linux-sandbox-utils.d.ts
+@@ -55,6 +55,8 @@ export interface LinuxSandboxParams {
+     mandatoryDenySearchDepth?: number;
+     /** Allow writes to .git/config files (default: false) */
+     allowGitConfig?: boolean;
++    /** Linux only: host device paths to bind with --dev-bind-try (default: none) */
++    allowDevices?: readonly string[];
+     /**
+      * Directories to emit as `safe.directory` via `GIT_CONFIG_*` env
+      * vars (see {@link buildPosixGitSafeDirEnv}). Under `--unshare-user`
+diff --git a/dist/sandbox/linux-sandbox-utils.js b/dist/sandbox/linux-sandbox-utils.js
+index 2a2d53cab6d985a02487a10b224659cb31114c4a..19050833914647c8a24ff3d43cfd75bc371e94de 100644
+--- a/dist/sandbox/linux-sandbox-utils.js
++++ b/dist/sandbox/linux-sandbox-utils.js
+@@ -1422,7 +1422,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+  * Dependencies are checked by checkLinuxDependencies() before enabling the sandbox.
+  */
+ export async function wrapCommandWithSandboxLinux(params) {
+-    const { command, commandId, needsNetworkRestriction, httpSocketPath, socksSocketPath, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, javaAgentJarPath, readConfig, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, maskedFileStoreDir, enableWeakerNestedSandbox, allowAllUnixSockets, binShell, ripgrepConfig = { command: 'rg' }, mandatoryDenySearchDepth = DEFAULT_MANDATORY_DENY_SEARCH_DEPTH, allowGitConfig = false, gitSafeDirectories, seccompConfig, bwrapPath, socatPath, observeSocketPath, abortSignal, } = params;
++    const { command, commandId, needsNetworkRestriction, httpSocketPath, socksSocketPath, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, javaAgentJarPath, readConfig, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, maskedFileStoreDir, enableWeakerNestedSandbox, allowAllUnixSockets, binShell, ripgrepConfig = { command: 'rg' }, mandatoryDenySearchDepth = DEFAULT_MANDATORY_DENY_SEARCH_DEPTH, allowGitConfig = false, allowDevices = [], gitSafeDirectories, seccompConfig, bwrapPath, socatPath, observeSocketPath, abortSignal, } = params;
+     // Determine if we have restrictions to apply
+     // Read: denyOnly pattern - empty array means no restrictions
+     // Write: allowOnly pattern - undefined means no restrictions, any config means restrictions
+@@ -1579,6 +1579,14 @@ export async function wrapCommandWithSandboxLinux(params) {
+         bwrapArgs.push(...fsArgs);
+         // Always bind /dev
+         bwrapArgs.push('--dev', '/dev');
++        for (const device of allowDevices ?? []) {
++            if (typeof device === 'string' &&
++                path.isAbsolute(device) &&
++                device.startsWith('/dev/') &&
++                path.resolve(device) === device) {
++                bwrapArgs.push('--dev-bind-try', device, device);
++            }
++        }
+         // ========== PID NAMESPACE ISOLATION ==========
+         // IMPORTANT: These must come AFTER filesystem binds for nested bwrap to work
+         // By default, always unshare PID namespace and mount fresh /proc.
+diff --git a/dist/sandbox/sandbox-config.d.ts b/dist/sandbox/sandbox-config.d.ts
+index 42b8e0c2678fc2219c1305b1dd4319c3b94415e9..9cabae2cb1855f737ad42f2eca96b2673b57a686 100644
+--- a/dist/sandbox/sandbox-config.d.ts
++++ b/dist/sandbox/sandbox-config.d.ts
+@@ -722,6 +722,7 @@ export declare const FilesystemConfigSchema: z.ZodObject<{
+     allowWrite: z.ZodArray<z.ZodString, "many">;
+     denyWrite: z.ZodArray<z.ZodString, "many">;
+     allowGitConfig: z.ZodOptional<z.ZodBoolean>;
++    allowDevices: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+ }, "strip", z.ZodTypeAny, {
+     denyRead: string[];
+     allowWrite: string[];
+@@ -729,6 +730,7 @@ export declare const FilesystemConfigSchema: z.ZodObject<{
+     disabled?: boolean | undefined;
+     allowRead?: string[] | undefined;
+     allowGitConfig?: boolean | undefined;
++    allowDevices?: string[] | undefined;
+ }, {
+     denyRead: string[];
+     allowWrite: string[];
+@@ -736,6 +738,7 @@ export declare const FilesystemConfigSchema: z.ZodObject<{
+     disabled?: boolean | undefined;
+     allowRead?: string[] | undefined;
+     allowGitConfig?: boolean | undefined;
++    allowDevices?: string[] | undefined;
+ }>;
+ /**
+  * Configuration schema for ignoring specific sandbox violations
+@@ -971,6 +974,7 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
+         allowWrite: z.ZodArray<z.ZodString, "many">;
+         denyWrite: z.ZodArray<z.ZodString, "many">;
+         allowGitConfig: z.ZodOptional<z.ZodBoolean>;
++        allowDevices: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+     }, "strip", z.ZodTypeAny, {
+         denyRead: string[];
+         allowWrite: string[];
+@@ -978,6 +982,7 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
+         disabled?: boolean | undefined;
+         allowRead?: string[] | undefined;
+         allowGitConfig?: boolean | undefined;
++        allowDevices?: string[] | undefined;
+     }, {
+         denyRead: string[];
+         allowWrite: string[];
+@@ -985,6 +990,7 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
+         disabled?: boolean | undefined;
+         allowRead?: string[] | undefined;
+         allowGitConfig?: boolean | undefined;
++        allowDevices?: string[] | undefined;
+     }>;
+     credentials: z.ZodOptional<z.ZodObject<{
+         files: z.ZodOptional<z.ZodArray<z.ZodObject<{
+@@ -1310,6 +1316,7 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
+         disabled?: boolean | undefined;
+         allowRead?: string[] | undefined;
+         allowGitConfig?: boolean | undefined;
++        allowDevices?: string[] | undefined;
+     };
+     windows?: {
+         sandboxUser?: string | undefined;
+@@ -1410,6 +1417,7 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
+         disabled?: boolean | undefined;
+         allowRead?: string[] | undefined;
+         allowGitConfig?: boolean | undefined;
++        allowDevices?: string[] | undefined;
+     };
+     windows?: {
+         sandboxUser?: string | undefined;
+@@ -1510,6 +1518,7 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
+         disabled?: boolean | undefined;
+         allowRead?: string[] | undefined;
+         allowGitConfig?: boolean | undefined;
++        allowDevices?: string[] | undefined;
+     };
+     windows?: {
+         sandboxUser?: string | undefined;
+@@ -1610,6 +1619,7 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
+         disabled?: boolean | undefined;
+         allowRead?: string[] | undefined;
+         allowGitConfig?: boolean | undefined;
++        allowDevices?: string[] | undefined;
+     };
+     windows?: {
+         sandboxUser?: string | undefined;
+diff --git a/dist/sandbox/sandbox-config.js b/dist/sandbox/sandbox-config.js
+index f5f3f045aa5b65f9efe34492e29bcc122a92bc1f..d7657125fb3c76b1cbed146cb6edb601f550b527 100644
+--- a/dist/sandbox/sandbox-config.js
++++ b/dist/sandbox/sandbox-config.js
+@@ -780,6 +780,10 @@ export const FilesystemConfigSchema = z.object({
+         .boolean()
+         .optional()
+         .describe('Allow writes to .git/config files (default: false). Enables git remote URL updates while keeping .git/hooks protected.'),
++    allowDevices: z
++        .array(filesystemPathSchema)
++        .optional()
++        .describe('Linux only: host device paths to bind into the sandbox with --dev-bind-try (for example /dev/nvidiactl, /dev/nvidia0). Default: none.'),
+ });
+ /**
+  * Configuration schema for ignoring specific sandbox violations
+diff --git a/dist/sandbox/sandbox-manager.js b/dist/sandbox/sandbox-manager.js
+index 753c7545c8080796feaa23d2c91ff6cb9f794de8..8c99b826a2f7097378a419c610fcf8632dbb104f 100644
+--- a/dist/sandbox/sandbox-manager.js
++++ b/dist/sandbox/sandbox-manager.js
+@@ -1354,6 +1354,7 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+                 gitSafeDirectories,
+                 seccompConfig: getSeccompConfig(),
+                 bwrapPath: config?.bwrapPath,
++                allowDevices: customConfig?.filesystem?.allowDevices ?? config?.filesystem?.allowDevices ?? [],
+                 socatPath: config?.socatPath,
+                 observeSocketPath: linuxMonitor?.observeSocketPath,
+                 abortSignal,

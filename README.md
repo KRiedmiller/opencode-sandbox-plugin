@@ -45,6 +45,10 @@ build it either, because this repository has no `prepare` script.
 
 Local entries are not update-checked by OpenCode. After `git pull`, rerun
 `bun install && bun run build`; OpenCode watches `dist/` and reloads the plugin.
+The `bun install` step is required: this fork carries a Bun patch for
+`@anthropic-ai/sandbox-runtime@0.0.76` (Linux device passthrough), and Bun
+reapplies it on every install. See [Maintenance](#maintenance) for the patch
+lifecycle and upgrade steps.
 
 Verify the plugin loaded by looking for a `loading plugin` line with this path
 in the OpenCode server log, or for the status-bar badge in the TUI
@@ -212,7 +216,29 @@ The plugin searches for configuration in this order (first match wins):
 
 The `<project-name>` is the basename of the project directory (e.g., `my-app` for `/home/user/projects/my-app`).
 
-If `XDG_CONFIG_HOME` is set, it is used instead of `~/.config`.
+If `XDG_CONFIG_HOME` is set, it is used instead of `~/.config`. Files are not
+merged: the first matching source is the whole user config, and built-in
+defaults fill any keys it omits.
+
+### Config reference
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `disabled` | boolean | `false` | Disable the plugin for this project. |
+| `filesystem.denyRead` | string[] | credential paths (`~/.ssh`, `~/.gnupg`, …) | Paths hidden from the sandbox (tmpfs or `/dev/null` mask). |
+| `filesystem.allowRead` | string[] | `[]` | Re-allow paths inside a denied path; takes precedence over `denyRead`. |
+| `filesystem.allowWrite` | string[] | project directory, worktree, temp dir | Writable paths; relative entries resolve against the project. |
+| `filesystem.denyWrite` | string[] | `[]` | Re-deny writes inside allowed paths; takes precedence over `allowWrite`. |
+| `filesystem.allowDevices` | string[] | `[]` | Linux only. Absolute canonical paths under `/dev/` bound into the sandbox. Requires the Bun patch in this fork; see [Linux device passthrough](#linux-device-passthrough). |
+| `network.allowedDomains` | string[] | npm, PyPI, GitHub, OpenAI, Anthropic, Google APIs | Domains allowed through the proxy. Replaces the default list. |
+| `network.deniedDomains` | string[] | `[]` | Explicitly denied domains. |
+| `network.allowUnixSockets` | string[] | unset | macOS: allow specific socket paths. Ignored on Linux (seccomp cannot filter by path). |
+| `network.allowAllUnixSockets` | boolean | `false` | Linux: skips `apply-seccomp`, which CUDA needs. Disables Unix-socket and `io_uring` blocking; high-risk socket paths are masked automatically. See [Linux device passthrough](#linux-device-passthrough). |
+| `network.allowLocalBinding` | boolean | `false` | Allow binding local ports. |
+
+Array-valued keys replace their defaults rather than merge, with one exception:
+the automatic socket masks added when `allowAllUnixSockets` is enabled are
+appended to whatever `denyRead` list is active.
 
 ### Example: Global config
 
@@ -238,6 +264,112 @@ If `XDG_CONFIG_HOME` is set, it is used instead of `~/.config`.
   }
 }
 ```
+
+### Linux device passthrough
+
+`filesystem.allowDevices` passes individual host devices into the Linux sandbox.
+It is Linux-only and opt-in; the default is no extra devices beyond the minimal
+`/dev` that bubblewrap creates.
+
+> **Scope:** the example below uses the *global* config, so it enables GPU
+> access for every project. Prefer a per-project file for GPU work: config
+> lookup is first-match-wins and does not merge, so
+> `~/.config/opencode/projects/<project>.sandbox.json` replaces the global file
+> for that project (built-in defaults still fill omitted keys).
+
+For example, to give the sandboxed agent access to an NVIDIA GPU:
+
+```json
+// ~/.config/opencode/sandbox.json
+{
+  "filesystem": {
+    "allowDevices": ["/dev/nvidiactl", "/dev/nvidia0", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia-modeset"]
+  },
+  "network": {
+    "allowAllUnixSockets": true
+  }
+}
+```
+
+The same settings in a per-project file keep GPU access out of every other
+project:
+
+```json
+// ~/.config/opencode/projects/my-gpu-app.sandbox.json
+{
+  "filesystem": {
+    "allowDevices": ["/dev/nvidiactl", "/dev/nvidia0", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia-modeset"]
+  },
+  "network": {
+    "allowAllUnixSockets": true
+  }
+}
+```
+
+`<project-name>` is the basename of the project directory, so
+`/home/user/projects/my-gpu-app` uses `my-gpu-app.sandbox.json`.
+
+Each path is mounted with bubblewrap's `--dev-bind-try` after the minimal `/dev`
+is set up, so the device appears at the same path inside the sandbox. Only
+absolute canonical paths under `/dev/` are accepted: relative paths, paths
+elsewhere (for example `/etc/shadow`), traversal such as `/dev/../etc/shadow`,
+and bare `/dev` are rejected as invalid config.
+
+CUDA needs a second option. `nvidia-smi` works with only `allowDevices`, but
+during `cuInit` `libcuda` opens an `AF_UNIX`/`SOCK_SEQPACKET` socket to
+`/tmp/nvidia-mps/control`, and the seccomp layer blocks that call with `EPERM`.
+Setting `network.allowAllUnixSockets: true` makes the runtime skip
+`apply-seccomp` entirely: Unix-socket creation and `io_uring` are no longer
+blocked, and the nested PID/mount namespace that helper creates is not used
+(bubblewrap's own `--unshare-pid` and fresh `/proc` still apply). The plugin
+warns at load time when `allowDevices` is set without it. Like `allowDevices`,
+this is Linux-only and opt-in.
+
+> **Security note:** `allowAllUnixSockets` disables the Unix-socket blocking
+> layer, which exposes host sockets such as `/run/docker.sock`. Docker socket
+> access is effectively root-equivalent on many hosts. To compensate, when
+> `allowAllUnixSockets` is enabled the plugin automatically appends `denyRead`
+> masks for high-risk socket paths: Docker, Podman, containerd and CRI-O
+> sockets, `$XDG_RUNTIME_DIR` (including the user bus and keyring/agent
+> sockets), the SSH agent socket (`$SSH_AUTH_SOCK`), systemd
+> private/journal sockets, the system D-Bus socket, and `/tmp/.X11-unix` /
+> `/tmp/.ICE-unix`. The masks are added on Linux only, without replacing a
+> user-supplied `denyRead` list.
+>
+> `/run/nvidia-persistenced/socket` and the NVIDIA device nodes are
+> intentionally **not** masked, so CUDA and `nvidia-smi` keep working. If a
+> trusted workflow needs one of the masked paths, `allowRead` can re-allow it
+> (`allowRead` takes precedence over `denyRead`). Masking is
+> defense-in-depth, not a guarantee: filesystem and network-domain rules still
+> apply, and a reachable socket is still governed by its own file permissions.
+> Use this option only for projects that need GPU compute and whose commands
+> you trust.
+
+> **Security note:** Every allowed device widens the sandbox. Exposed kernel
+> drivers become attack surface, and a GPU made available this way gives the
+> agent GPU compute (and whatever it can reach through that driver). Filesystem
+> and network rules still apply, but they do not constrain what a device driver
+> exposes. Leave it off unless a workload genuinely needs the device.
+
+This option depends on the Bun patch to `@anthropic-ai/sandbox-runtime` carried
+in this fork (`patches/@anthropic-ai%2Fsandbox-runtime@0.0.76.patch`); the
+upstream package does not emit `--dev-bind-try` for these paths.
+
+Verify from inside an agent shell command:
+
+```bash
+nvidia-smi
+```
+
+`nvidia-smi` proves only that the driver nodes are visible; CUDA also needs the
+`allowAllUnixSockets` setting described above. If `nvidia-smi` says it cannot
+communicate with the driver, the device nodes are missing: check that the
+runtime patch is applied (see [Maintenance](#maintenance)) and that the config
+file being loaded is the one you edited.
+
+To remove GPU support, delete `filesystem.allowDevices` and
+`network.allowAllUnixSockets` from the active config (or delete the per-project
+file) and restart OpenCode.
 
 ### Path precedence
 
@@ -324,6 +456,108 @@ The command palette offers **Toggle Sandbox**, which pauses and resumes sandboxi
 Paused state is stored per project under `~/.cache/opencode-sandbox/toggle/` and survives restarts. It automatically re-enables after 7 days, so a sandbox is never left paused indefinitely.
 
 The status-bar badge reflects the current state: green `on`, yellow `paused`, subdued `off` — and updates immediately when toggled.
+
+## Maintenance
+
+### Update the plugin
+
+Local directory installs are not update-checked. After `git pull`:
+
+```bash
+cd /path/to/opencode-sandbox-plugin
+git pull
+bun install      # reapplies patches/
+bun run build
+```
+
+OpenCode watches `dist/`, so code changes hot-reload. Config changes and
+runtime-patch changes need a full OpenCode restart: `SandboxManager.initialize()`
+is process-global and runs once per server process, so a plugin hot-reload does
+not re-read `sandbox.json` or reload the patched runtime module.
+
+### The sandbox-runtime patch
+
+This fork carries `patches/@anthropic-ai%2Fsandbox-runtime@0.0.76.patch`, wired
+through `patchedDependencies` in `package.json` and `bun.lock`. It adds
+`filesystem.allowDevices` to the runtime:
+
+- `FilesystemConfigSchema` accepts the key.
+- `wrapWithSandbox` forwards the per-call/global device list to the Linux
+  wrapper.
+- After bwrap's `--dev /dev`, each device is mounted with
+  `--dev-bind-try <path> <path>`.
+- The runtime accepts only absolute canonical paths under `/dev/`; the plugin
+  applies the same validation before the runtime sees the list.
+- The TypeScript declarations are updated for the new field.
+
+The patch is pinned to exactly `0.0.76` (`^0.0.76` resolves to `0.0.76` for
+`0.0.x`). If you deliberately upgrade the runtime, regenerate the patch instead
+of editing `node_modules` by hand:
+
+```bash
+# bump and install the new dependency first
+bun add @anthropic-ai/sandbox-runtime@<version>
+bun install
+
+# reapply the same edits in node_modules/@anthropic-ai/sandbox-runtime,
+# then commit them as the patch for that version
+bun patch @anthropic-ai/sandbox-runtime@<version>
+bun patch --commit 'node_modules/@anthropic-ai/sandbox-runtime'
+
+bun test
+bun run build
+```
+
+The patch filename includes the exact version, so upgrading produces
+`patches/@anthropic-ai%2Fsandbox-runtime@<version>.patch` and a matching
+`patchedDependencies` entry.
+
+A missing or outdated patch fails silently for GPU users: the unpatched zod
+schema strips `filesystem.allowDevices`, the sandbox starts without the device
+nodes, and `nvidia-smi` reports that it cannot communicate with the driver.
+Verify the patch is applied:
+
+```bash
+grep -R "allowDevices" \
+  node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/{sandbox-config.js,sandbox-manager.js,linux-sandbox-utils.js}
+bun test
+```
+
+### Verify the live plugin
+
+- Server log: a `loading plugin` line with this checkout's `dist/index.js`.
+- TUI: the `⊙ sandbox: on` badge.
+- Fail-closed check: writing to `$HOME` should fail with
+  `Read-only file system`.
+- GPU: `nvidia-smi` inside an agent shell command, plus a CUDA workload (see
+  [Linux device passthrough](#linux-device-passthrough)).
+
+### Remove GPU support or the patch
+
+1. Remove `filesystem.allowDevices` and `network.allowAllUnixSockets` from the
+   active config (or delete the per-project file) and restart OpenCode.
+2. To drop the runtime patch entirely:
+
+```bash
+rm patches/@anthropic-ai%2Fsandbox-runtime@0.0.76.patch
+# delete the "patchedDependencies" block from package.json
+bun install
+bun run build
+```
+
+`bun install` rewrites `bun.lock` without the patch. If `package.json` and
+`bun.lock` have no other local changes, `git checkout -- package.json bun.lock`
+also works. Without the patch, `filesystem.allowDevices` is ignored by the
+runtime, so remove it from the config as well. The AppArmor profile from
+[Linux prerequisites](#linux-prerequisites) is independent and can stay, or be
+removed with the commands shown there.
+
+### Local-path caveat
+
+This install points OpenCode at a local directory. If that directory is moved
+or deleted, the plugin cannot load and agent commands run **unsandboxed**
+(logged as a plugin load error). Keep the checkout at a stable path and check
+the server log after moving it.
 
 ## How it works
 

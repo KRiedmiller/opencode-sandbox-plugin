@@ -28,6 +28,7 @@ describe("resolveConfig", () => {
     expect(config.filesystem?.allowWrite).toContain(PROJECT_DIR)
     expect(config.filesystem?.allowWrite).toContain(os.tmpdir())
     expect(config.filesystem?.denyWrite).toEqual([])
+    expect(config.filesystem?.allowDevices).toEqual([])
 
     // Network
     expect(config.network?.allowedDomains).toContain("registry.npmjs.org")
@@ -155,6 +156,28 @@ describe("resolveConfig", () => {
     expect(config.filesystem?.denyWrite).toEqual(["/etc/passwd", "~/.env"])
   })
 
+  test("forwards allowDevices unchanged", () => {
+    const user: SandboxPluginConfig = {
+      filesystem: {
+        allowDevices: ["/dev/nvidiactl", "/dev/nvidia0"],
+      },
+    }
+    const config = resolveConfig(PROJECT_DIR, WORKTREE, user)
+
+    expect(config.filesystem?.allowDevices).toEqual(["/dev/nvidiactl", "/dev/nvidia0"])
+  })
+
+  test("deduplicates allowDevices", () => {
+    const user: SandboxPluginConfig = {
+      filesystem: {
+        allowDevices: ["/dev/nvidiactl", "/dev/nvidiactl"],
+      },
+    }
+    const config = resolveConfig(PROJECT_DIR, WORKTREE, user)
+
+    expect(config.filesystem?.allowDevices).toEqual(["/dev/nvidiactl"])
+  })
+
   test("handles unix socket config", () => {
     const user: SandboxPluginConfig = {
       network: {
@@ -166,6 +189,85 @@ describe("resolveConfig", () => {
 
     expect(config.network?.allowUnixSockets).toEqual(["/var/run/docker.sock"])
     expect(config.network?.allowAllUnixSockets).toBe(false)
+  })
+})
+
+describe("unix socket masks", () => {
+  const isLinux = process.platform === "linux"
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0
+  const commonMasks = [
+    "/run/docker.sock",
+    "/run/podman/podman.sock",
+    "/run/systemd/private",
+    "/run/dbus/system_bus_socket",
+    "/tmp/.X11-unix",
+    "/tmp/.ICE-unix",
+  ]
+
+  const restoreEnv = (key: string, value: string | undefined) => {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+
+  test("masks high-risk sockets when allowAllUnixSockets is enabled", () => {
+    if (!isLinux) return
+    const previousRuntimeDir = process.env.XDG_RUNTIME_DIR
+    delete process.env.XDG_RUNTIME_DIR
+    try {
+      const config = resolveConfig(PROJECT_DIR, WORKTREE, {
+        network: { allowAllUnixSockets: true },
+      })
+
+      for (const socketPath of [...commonMasks, `/run/user/${uid}`]) {
+        expect(config.filesystem?.denyRead).toContain(socketPath)
+      }
+      expect(config.filesystem?.denyRead).not.toContain("/run/nvidia-persistenced/socket")
+    } finally {
+      restoreEnv("XDG_RUNTIME_DIR", previousRuntimeDir)
+    }
+  })
+
+  test("does not mask sockets when allowAllUnixSockets is absent or false", () => {
+    const configs = [
+      resolveConfig(PROJECT_DIR, WORKTREE),
+      resolveConfig(PROJECT_DIR, WORKTREE, { network: {} }),
+      resolveConfig(PROJECT_DIR, WORKTREE, { network: { allowAllUnixSockets: false } }),
+    ]
+
+    for (const config of configs) {
+      for (const socketPath of [...commonMasks, `/run/user/${uid}`]) {
+        expect(config.filesystem?.denyRead).not.toContain(socketPath)
+      }
+    }
+  })
+
+  test("appends socket masks to a user-supplied denyRead", () => {
+    if (!isLinux) return
+    const config = resolveConfig(PROJECT_DIR, WORKTREE, {
+      filesystem: { denyRead: ["/custom/secret"] },
+      network: { allowAllUnixSockets: true },
+    })
+
+    expect(config.filesystem?.denyRead).toContain("/custom/secret")
+    expect(config.filesystem?.denyRead).toContain("/run/docker.sock")
+  })
+
+  test("honors XDG_RUNTIME_DIR and SSH_AUTH_SOCK overrides", () => {
+    if (!isLinux) return
+    const previousRuntimeDir = process.env.XDG_RUNTIME_DIR
+    const previousSshAgent = process.env.SSH_AUTH_SOCK
+    process.env.XDG_RUNTIME_DIR = "/run/user/424242"
+    process.env.SSH_AUTH_SOCK = "/run/user/424242/keyring/ssh"
+    try {
+      const config = resolveConfig(PROJECT_DIR, WORKTREE, {
+        network: { allowAllUnixSockets: true },
+      })
+      expect(config.filesystem?.denyRead).toContain("/run/user/424242")
+      expect(config.filesystem?.denyRead).toContain("/run/user/424242/keyring/ssh")
+    } finally {
+      restoreEnv("XDG_RUNTIME_DIR", previousRuntimeDir)
+      restoreEnv("SSH_AUTH_SOCK", previousSshAgent)
+    }
   })
 })
 
@@ -459,6 +561,81 @@ describe("validateConfig", () => {
     expect(errors).toEqual([])
     expect(warnings).toContain('ignoring unknown key "futureKey"')
     expect(warnings).toContain('ignoring unknown key "filesystem.futureSubKey"')
+  })
+
+  test("accepts allowDevices entries under /dev", () => {
+    const { errors, warnings } = validateConfig({
+      filesystem: { allowDevices: ["/dev/nvidiactl", "/dev/nvidia0"] },
+      network: { allowAllUnixSockets: true },
+    })
+    expect(errors).toEqual([])
+    expect(warnings).toEqual([])
+  })
+
+  test("warns when allowDevices is set without allowAllUnixSockets", () => {
+    const { errors, warnings } = validateConfig({
+      filesystem: { allowDevices: ["/dev/nvidiactl", "/dev/nvidia0"] },
+    })
+    expect(errors).toEqual([])
+    expect(warnings.join("\n")).toMatch(/allowDevices.*allowAllUnixSockets/s)
+  })
+
+  test("does not warn about allowDevices when allowAllUnixSockets is true", () => {
+    const { warnings } = validateConfig({
+      filesystem: { allowDevices: ["/dev/nvidiactl", "/dev/nvidia0"] },
+      network: { allowAllUnixSockets: true },
+    })
+    expect(warnings.join("\n")).not.toMatch(/allowDevices.*allowAllUnixSockets/s)
+  })
+
+  test("does not warn about allowDevices when it is absent", () => {
+    const { warnings } = validateConfig({
+      network: { allowAllUnixSockets: false },
+    })
+    expect(warnings.join("\n")).not.toMatch(/allowDevices.*allowAllUnixSockets/s)
+  })
+
+  test("rejects a non-array allowDevices", () => {
+    const { errors } = validateConfig({
+      filesystem: { allowDevices: "/dev/nvidia0" },
+    })
+    expect(errors).toContain("filesystem.allowDevices must be an array of strings")
+  })
+
+  test("rejects allowDevices outside /dev", () => {
+    const { errors } = validateConfig({
+      filesystem: { allowDevices: ["/etc/shadow"] },
+    })
+    expect(errors).toContain(
+      'filesystem.allowDevices entries must be absolute canonical paths under /dev/ (got "/etc/shadow")',
+    )
+  })
+
+  test("rejects relative allowDevices", () => {
+    const { errors } = validateConfig({
+      filesystem: { allowDevices: ["dev/nvidia0"] },
+    })
+    expect(errors).toContain(
+      'filesystem.allowDevices entries must be absolute canonical paths under /dev/ (got "dev/nvidia0")',
+    )
+  })
+
+  test("rejects allowDevices with traversal", () => {
+    const { errors } = validateConfig({
+      filesystem: { allowDevices: ["/dev/../etc/shadow"] },
+    })
+    expect(errors).toContain(
+      'filesystem.allowDevices entries must be absolute canonical paths under /dev/ (got "/dev/../etc/shadow")',
+    )
+  })
+
+  test("rejects bare /dev as an allowDevices entry", () => {
+    const { errors } = validateConfig({
+      filesystem: { allowDevices: ["/dev"] },
+    })
+    expect(errors).toContain(
+      'filesystem.allowDevices entries must be absolute canonical paths under /dev/ (got "/dev")',
+    )
   })
 
   test("rejects non-object roots", () => {

@@ -11,6 +11,7 @@ export interface SandboxPluginConfig {
     allowRead?: string[]
     allowWrite?: string[]
     denyWrite?: string[]
+    allowDevices?: string[]
   }
   network?: {
     allowedDomains?: string[]
@@ -34,6 +35,52 @@ const DEFAULT_DENY_READ_DIRS = [
   ".netrc",
   ".env",
 ]
+
+/** High-risk Unix sockets that become reachable when the runtime's seccomp
+ * socket filter is disabled by `allowAllUnixSockets`. Docker socket access is
+ * effectively root-equivalent on many hosts, so these are masked by default.
+ * NVIDIA device nodes and `/run/nvidia-persistenced/socket` are intentionally
+ * absent so GPU passthrough keeps working.
+ *
+ * Existing paths are canonicalized because bwrap cannot create a `/dev/null`
+ * file bind over a destination that traverses a symlinked directory: on a
+ * typical Linux host `/var/run` is a symlink to `/run`, and masking
+ * `/var/run/docker.sock` aborts the whole command ("Can't create file at
+ * /var/run/docker.sock"). Absent paths are kept verbatim; the runtime skips
+ * them, and keeping them here makes the configured deny list predictable. */
+function riskyUnixSocketPaths(): string[] {
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined
+  const runtimeDir =
+    process.env.XDG_RUNTIME_DIR ?? (uid !== undefined ? `/run/user/${uid}` : undefined)
+  const sshAgent = process.env.SSH_AUTH_SOCK
+  const candidates = [
+    "/run/docker.sock",
+    "/var/run/docker.sock",
+    "/run/podman/podman.sock",
+    "/run/containerd/containerd.sock",
+    "/run/crio/crio.sock",
+    "/run/systemd/private",
+    "/run/systemd/journal/socket",
+    "/run/dbus/system_bus_socket",
+    "/tmp/.X11-unix",
+    "/tmp/.ICE-unix",
+    runtimeDir,
+    sshAgent,
+  ]
+  return [
+    ...new Set(
+      candidates
+        .filter((p): p is string => !!p && p.startsWith("/"))
+        .map((p) => {
+          try {
+            return fs.realpathSync(p)
+          } catch {
+            return p
+          }
+        }),
+    ),
+  ]
+}
 
 const DEFAULT_ALLOWED_DOMAINS = [
   "registry.npmjs.org",
@@ -111,18 +158,28 @@ export function resolveConfig(
   const userDenyRead = user?.filesystem?.denyRead
   const userAllowRead = user?.filesystem?.allowRead
   const userDenyWrite = user?.filesystem?.denyWrite
+  const userAllowDevices = user?.filesystem?.allowDevices
+
+  const baseDenyRead = userDenyRead
+    ? userDenyRead.map((p) => resolveUserPath(p, canonicalProjectDir))
+    : DEFAULT_DENY_READ_DIRS.map((p) => path.join(homeDir, p))
+  const denyRead =
+    process.platform === "linux" && user?.network?.allowAllUnixSockets === true
+      ? [...new Set([...baseDenyRead, ...riskyUnixSocketPaths()])]
+      : baseDenyRead
 
   return {
     filesystem: {
-      denyRead: userDenyRead
-        ? userDenyRead.map((p) => resolveUserPath(p, canonicalProjectDir))
-        : DEFAULT_DENY_READ_DIRS.map((p) => path.join(homeDir, p)),
+      denyRead,
       allowRead: userAllowRead
         ? userAllowRead.map((p) => resolveUserPath(p, canonicalProjectDir))
         : [],
       allowWrite: writePaths,
       denyWrite: userDenyWrite
         ? userDenyWrite.map((p) => resolveUserPath(p, canonicalProjectDir))
+        : [],
+      allowDevices: userAllowDevices
+        ? [...new Set(userAllowDevices.map((p) => path.resolve(p)))]
         : [],
     },
     network: {
@@ -135,7 +192,13 @@ export function resolveConfig(
   }
 }
 
-const FILESYSTEM_KEYS = new Set(["denyRead", "allowRead", "allowWrite", "denyWrite"])
+const FILESYSTEM_KEYS = new Set([
+  "denyRead",
+  "allowRead",
+  "allowWrite",
+  "denyWrite",
+  "allowDevices",
+])
 const NETWORK_KEYS = new Set([
   "allowedDomains",
   "deniedDomains",
@@ -177,6 +240,18 @@ export function validateConfig(config: unknown): { errors: string[]; warnings: s
           warnings.push(`ignoring unknown key "${key}.${subKey}"`)
         } else if (subKey === "allowAllUnixSockets" || subKey === "allowLocalBinding") {
           if (typeof subValue !== "boolean") errors.push(`${key}.${subKey} must be a boolean`)
+        } else if (subKey === "allowDevices") {
+          if (!isStringArray(subValue)) {
+            errors.push(`${key}.${subKey} must be an array of strings`)
+          } else {
+            for (const device of subValue) {
+              if (!device.startsWith("/dev/") || path.resolve(device) !== device) {
+                errors.push(
+                  `${key}.${subKey} entries must be absolute canonical paths under /dev/ (got "${device}")`,
+                )
+              }
+            }
+          }
         } else if (!isStringArray(subValue)) {
           errors.push(`${key}.${subKey} must be an array of strings`)
         }
@@ -185,6 +260,22 @@ export function validateConfig(config: unknown): { errors: string[]; warnings: s
       warnings.push(`ignoring unknown key "${key}"`)
     }
   }
+
+  // Cross-field warning: CUDA on Linux opens an AF_UNIX/SOCK_SEQPACKET socket
+  // during cuInit, which the runtime's seccomp layer blocks unless socket
+  // filtering is disabled. Device access alone is enough for nvidia-smi.
+  const allowDevices = isObject(config.filesystem) ? config.filesystem.allowDevices : undefined
+  const network = isObject(config.network) ? config.network : undefined
+  if (
+    isStringArray(allowDevices) &&
+    allowDevices.length > 0 &&
+    network?.allowAllUnixSockets !== true
+  ) {
+    warnings.push(
+      "filesystem.allowDevices grants device access, but CUDA on Linux also needs network.allowAllUnixSockets: true (the seccomp layer blocks the AF_UNIX/SOCK_SEQPACKET socket libcuda opens); enabling it disables Unix-socket blocking",
+    )
+  }
+
   return { errors, warnings }
 }
 
