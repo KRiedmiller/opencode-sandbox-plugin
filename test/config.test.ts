@@ -541,6 +541,29 @@ describe("validateConfig", () => {
     expect(warnings).toEqual([])
   })
 
+  test("accepts an environment map with no diagnostics", () => {
+    const { errors, warnings } = validateConfig({
+      environment: {
+        NUMBA_CACHE_DIR: "/tmp/opencode/cache/numba",
+        C_INCLUDE_PATH: "/usr/local/cuda/include",
+      },
+    })
+    expect(errors).toEqual([])
+    expect(warnings).toEqual([])
+  })
+
+  test("rejects a non-object environment", () => {
+    expect(validateConfig({ environment: [] }).errors).toContain(
+      "environment must be a JSON object",
+    )
+  })
+
+  test("rejects non-string environment values", () => {
+    expect(validateConfig({ environment: { COUNT: 1 } }).errors).toContain(
+      "environment.COUNT must be a string",
+    )
+  })
+
   test("collects every structural error", () => {
     const { errors } = validateConfig({
       disabled: 1,

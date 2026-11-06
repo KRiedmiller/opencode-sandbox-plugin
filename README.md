@@ -166,20 +166,24 @@ $ curl https://registry.npmjs.org
 ### Default restrictions
 
 **Filesystem (deny-read)**:
+
 - `~/.ssh`, `~/.gnupg`
 - `~/.aws/credentials`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`
 - `~/.kube`, `~/.docker/config.json`
 - `~/.npmrc`, `~/.netrc`, `~/.env`
 
 **Filesystem (allow-read)**:
+
 - Empty by default
 
 **Filesystem (allow-write)**:
+
 - Project directory
 - Git worktree (validated — unsafe paths like `/` are rejected)
 - `/tmp`
 
 **Network (allow-only)**:
+
 - `registry.npmjs.org`, `*.npmjs.org`
 - `registry.yarnpkg.com`
 - `pypi.org`, `*.pypi.org`, `crates.io`, `*.crates.io`
@@ -225,6 +229,7 @@ defaults fill any keys it omits.
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `disabled` | boolean | `false` | Disable the plugin for this project. |
+| `environment` | Record<string, string> | `{}` | Extra environment variables for every sandboxed command. Values are literal (no `~` or `$VAR` expansion); use absolute paths. |
 | `filesystem.denyRead` | string[] | credential paths (`~/.ssh`, `~/.gnupg`, …) | Paths hidden from the sandbox (tmpfs or `/dev/null` mask). |
 | `filesystem.allowRead` | string[] | `[]` | Re-allow paths inside a denied path; takes precedence over `denyRead`. |
 | `filesystem.allowWrite` | string[] | project directory, worktree, temp dir | Writable paths; relative entries resolve against the project. |
@@ -264,6 +269,31 @@ appended to whatever `denyRead` list is active.
   }
 }
 ```
+
+### Command environment variables
+
+Use `environment` to give every sandboxed command a fixed set of variables.
+This is useful for tools that insist on writing caches under `$HOME`, which
+stays read-only inside the sandbox:
+
+```json
+{
+  "environment": {
+    "NUMBA_CACHE_DIR": "/tmp/opencode/cache/numba",
+    "XDG_CACHE_HOME": "/tmp/opencode/cache/xdg",
+    "MPLCONFIGDIR": "/tmp/opencode/cache/matplotlib"
+  }
+}
+```
+
+Values are passed through literally; use absolute paths. They are visible to
+the agent's shell and its child processes. Treat this as trusted config:
+overriding `PATH` or loader variables affects every command. Do not put
+secrets here — use the runtime's credential masking instead. For sandboxed
+commands, the plugin's own `OPENCODE_SANDBOX_REAL_SHELL` /
+`OPENCODE_SANDBOX_WRAPPED_COMMAND` variables take precedence over entries in
+this map. Like every config key, this requires an OpenCode restart because
+`SandboxManager.initialize()` is process-global.
 
 ### Linux device passthrough
 

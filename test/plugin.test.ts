@@ -88,7 +88,7 @@ const makeCtx = (directory = "/tmp/project") => {
   return { ctx, hooks, bus }
 }
 
-const makeInvocation = (shell = "/bin/bash") => ({
+const makeInvocation = (shell = "/bin/bash"): Parameters<ShellHook>[0] => ({
   command: "echo hello",
   cwd: "/tmp/project",
   timeout: 0,
@@ -203,6 +203,82 @@ describe("plugin", () => {
     expect(invocation.shell).toBe("/bin/zsh")
     expect(invocation.env.OPENCODE_SANDBOX_WRAPPED_COMMAND).toBeUndefined()
     expect(fs.existsSync(path.join(shimDir(), "sandbox", "zsh"))).toBe(false)
+  })
+
+  test("injects configured environment variables and preserves unrelated ones", async () => {
+    if (process.platform === "win32") return
+    process.env.OPENCODE_SANDBOX_CONFIG = JSON.stringify({
+      environment: { NUMBA_CACHE_DIR: "/tmp/numba" },
+    })
+    const { hooks } = await setupPlugin()
+    const invocation = makeInvocation()
+    invocation.env.EXISTING = "from-host"
+
+    await hooks["create.before"]?.(invocation)
+
+    expect(invocation.env.NUMBA_CACHE_DIR).toBe("/tmp/numba")
+    expect(invocation.env.EXISTING).toBe("from-host")
+    expect(invocation.env.TERM).toBe("xterm-256color")
+  })
+
+  test("configured environment wins over a pre-existing value", async () => {
+    if (process.platform === "win32") return
+    process.env.OPENCODE_SANDBOX_CONFIG = JSON.stringify({
+      environment: { EXISTING: "from-config" },
+    })
+    const { hooks } = await setupPlugin()
+    const invocation = makeInvocation()
+    invocation.env.EXISTING = "from-host"
+
+    await hooks["create.before"]?.(invocation)
+
+    expect(invocation.env.EXISTING).toBe("from-config")
+  })
+
+  test("plugin internals win over configured environment", async () => {
+    if (process.platform === "win32") return
+    process.env.OPENCODE_SANDBOX_CONFIG = JSON.stringify({
+      environment: {
+        OPENCODE_SANDBOX_REAL_SHELL: "/bin/false",
+        OPENCODE_SANDBOX_WRAPPED_COMMAND: "evil",
+      },
+    })
+    const { hooks } = await setupPlugin()
+    const invocation = makeInvocation()
+
+    await hooks["create.before"]?.(invocation)
+
+    expect(invocation.env.OPENCODE_SANDBOX_REAL_SHELL).toBe("/bin/bash")
+    expect(invocation.env.OPENCODE_SANDBOX_WRAPPED_COMMAND).toBe("srt-wrapped: echo hello")
+  })
+
+  test("injects environment even when the wrap is a no-op", async () => {
+    if (process.platform === "win32") return
+    process.env.OPENCODE_SANDBOX_CONFIG = JSON.stringify({
+      environment: { FOO: "bar" },
+    })
+    mockWrapWithSandbox.mockImplementation((cmd: string) => Promise.resolve(cmd))
+    const { hooks } = await setupPlugin()
+    const invocation = makeInvocation()
+
+    await hooks["create.before"]?.(invocation)
+
+    expect(invocation.env.FOO).toBe("bar")
+  })
+
+  test("does not inject environment when the sandbox is toggled off", async () => {
+    if (process.platform === "win32") return
+    process.env.OPENCODE_SANDBOX_CONFIG = JSON.stringify({
+      environment: { FOO: "bar" },
+    })
+    await toggleModule.setSandboxToggledOff(TEST_PROJECT, true)
+    const { hooks } = await setupPlugin()
+    const invocation = makeInvocation()
+
+    await hooks["create.before"]?.(invocation)
+
+    expect(invocation.env.FOO).toBeUndefined()
+    await toggleModule.setSandboxToggledOff(TEST_PROJECT, false)
   })
 
   test("wrap failure installs the blocked shim", async () => {

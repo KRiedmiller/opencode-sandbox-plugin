@@ -108,6 +108,15 @@ export default Plugin.define({
       if (await isSandboxToggledOff(projectDir)) return
       if (!invocation.command) return
 
+      // Project-wide env for every command the plugin handles. Applied before
+      // the wrap so it also reaches commands that need no restrictions. For
+      // commands that go through the shim, the sandbox's own
+      // OPENCODE_SANDBOX_* variables are assigned later and win.
+      invocation.env = {
+        ...invocation.env,
+        ...(userConfig.environment ?? {}),
+      }
+
       try {
         if (!(await ensureSandboxReady())) throw new Error("sandbox initialization failed")
 
