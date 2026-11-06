@@ -79,6 +79,22 @@ describe("OpenCode V2 plugin", () => {
     cleanup.mockReset()
   })
 
+  test("applies config environment variables, with sandbox variables taking precedence", async () => {
+    process.env.OPENCODE_SANDBOX_CONFIG = JSON.stringify({
+      mode: "enforce",
+      environment: {
+        CUSTOM_SETTING: "configured",
+        OPENCODE_SANDBOX_WRAPPED: "user-value",
+      },
+    })
+    const f = fixture()
+    const dispose = await plugin.setup(f.ctx)
+    await f.tool.execute({ command: "true" }, shellContext)
+    expect(f.event.env.CUSTOM_SETTING).toBe("configured")
+    expect(f.event.env.OPENCODE_SANDBOX_WRAPPED).toBe("printf WRAPPED")
+    await dispose?.()
+  })
+
   test("preserves command-specific permissions and runs the sandbox launcher", async () => {
     if (process.platform === "win32") return
     const f = fixture()

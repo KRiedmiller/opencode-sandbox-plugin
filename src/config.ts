@@ -7,6 +7,7 @@ import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime"
 export interface SandboxPluginConfig {
   disabled?: boolean
   mode?: "permissive" | "enforce"
+  environment?: Record<string, string>
   filesystem?: {
     denyRead?: string[]
     allowRead?: string[]
@@ -235,6 +236,16 @@ export function validateConfig(config: unknown): { errors: string[]; warnings: s
         errors.push("disabled must be a boolean")
       } else if (key === "mode" && value !== "permissive" && value !== "enforce") {
         errors.push('mode must be "permissive" or "enforce"')
+      }
+    } else if (key === "environment") {
+      if (!isObject(value)) {
+        errors.push("environment must be a JSON object")
+      } else {
+        for (const [name, envValue] of Object.entries(value)) {
+          if (typeof envValue !== "string") {
+            errors.push(`environment.${name} must be a string`)
+          }
+        }
       }
     } else if (key === "filesystem" || key === "network") {
       const knownKeys = key === "filesystem" ? FILESYSTEM_KEYS : NETWORK_KEYS

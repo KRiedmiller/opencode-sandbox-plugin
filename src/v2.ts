@@ -145,6 +145,10 @@ const plugin: Plugin.Plugin & { server: typeof SandboxPlugin } = {
         if (active) throw new Error(ENFORCEMENT_ERROR)
         return
       }
+      // Project-wide env for every command the plugin handles. Applied before
+      // the wrap so it also reaches commands that need no restrictions. The
+      // sandbox's own OPENCODE_SANDBOX_* variables are assigned later and win.
+      if (user.environment) Object.assign(event.env, user.environment)
       try {
         if (process.platform === "win32")
           throw new Error("Windows command-string sandboxing is unsupported")
