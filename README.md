@@ -590,6 +590,10 @@ OpenCode V2 wraps the shell executable rather than the command string. This keep
 
 If an interrupted V2 shell's exit cannot be confirmed, the plugin defers mount-point cleanup until server exit. This prevents removing a deny rule while a process might still be running.
 
+### TUI badge
+
+The package also exports a TUI part (`./tui`), which adds a `⊙ sandbox: on` badge to the home and prompt footers. It shows `⊙ sandbox: off` when the active config sets `disabled: true`, and is absent when `OPENCODE_DISABLE_SANDBOX` is set. The badge reflects config at plugin load; saving a config change reloads the plugin.
+
 In OpenCode V1:
 
 The plugin uses two OpenCode hooks:

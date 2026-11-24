@@ -310,6 +310,12 @@ export function getOpenCodeConfigDir(): string {
   return path.join(xdgConfig, "opencode")
 }
 
+export function isSandboxGloballyDisabled(): boolean {
+  return (
+    process.env.OPENCODE_DISABLE_SANDBOX === "1" || process.env.OPENCODE_DISABLE_SANDBOX === "true"
+  )
+}
+
 async function tryLoadJsonFile(filePath: string): Promise<SandboxPluginConfig | null> {
   try {
     const content = await fs.readFile(filePath, "utf-8")

@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/v2.d.ts",
       "import": "./dist/v2.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
     }
   },
   "files": [
@@ -20,7 +24,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "bun build ./src/index.ts ./src/v2.ts --outdir dist --target node --format esm --external @anthropic-ai/sandbox-runtime --external @opencode-ai/plugin --external @opencode/plugin && bun x tsc --emitDeclarationOnly --declaration --outDir dist",
+    "build": "bun build ./src/index.ts ./src/v2.ts ./src/tui.tsx --outdir dist --target node --format esm --external @anthropic-ai/sandbox-runtime --external @opencode-ai/plugin --external @opencode/plugin --external '@opencode/plugin/*' --external @opentui/core --external '@opentui/*' --external solid-js && bun x tsc --emitDeclarationOnly --declaration --outDir dist",
     "dev": "bun run --watch src/index.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
@@ -63,10 +67,22 @@
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.0.0",
-    "@opencode/plugin": ">=2.2.6"
+    "@opencode/plugin": ">=2.2.6",
+    "@opentui/core": ">=0.8.1",
+    "@opentui/solid": ">=0.8.1",
+    "solid-js": ">=1.9.0"
   },
   "peerDependenciesMeta": {
     "@opencode/plugin": {
+      "optional": true
+    },
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
       "optional": true
     }
   },
@@ -76,7 +92,11 @@
     "@opencode-ai/sdk": "^1.2.1",
     "@opencode/plugin": "2.2.6",
     "@opencode/sdk": "2.2.6",
+    "@opencode/theme": "2.2.6",
+    "@opentui/core": "0.8.1",
+    "@opentui/solid": "0.8.1",
     "@types/bun": "^1.3.9",
+    "solid-js": "^1.9.15",
     "typescript": "^7.0.2"
   },
   "patchedDependencies": {

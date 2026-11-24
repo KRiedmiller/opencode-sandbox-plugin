@@ -6,6 +6,8 @@
     "declaration": true,
     "strict": true,
     "esModuleInterop": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/solid",
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": "src",
