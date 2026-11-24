@@ -36,14 +36,15 @@ For OpenCode V1:
 
 The plugin is automatically installed from npm when OpenCode starts.
 
-GPU device passthrough is only available from this fork, which carries a Bun
+GPU device passthrough is only available from this branch, which carries a Bun
 patch for `@anthropic-ai/sandbox-runtime` (see
-[Linux device passthrough](#linux-device-passthrough)). Install it from a
-checkout instead, and rerun `bun install` after every `git pull` so the patch
-is reapplied:
+[Linux device passthrough](#linux-device-passthrough)). The branch tracks
+upstream `main`, and the GPU patch is not in the published package. Install it
+from a checkout instead, and rerun `bun install` after every `git pull` so the
+patch is reapplied:
 
 ```bash
-git clone https://github.com/KRiedmiller/opencode-sandbox-plugin
+git clone --branch feat/gpu_support https://github.com/KRiedmiller/opencode-sandbox-plugin
 cd opencode-sandbox-plugin
 bun install
 bun run build
@@ -53,7 +54,7 @@ Then point `plugins` at the absolute path of the checkout. A built `dist/` is
 required because OpenCode loads the package through its `exports`; a checkout
 without one fails to load, and installing straight from git does not build it
 either because this repository has no `prepare` script. Local entries are not
-update-checked, and they do not appear in `opencode plugin list`.
+update-checked by OpenCode.
 
 ### Linux prerequisites
 
@@ -197,7 +198,10 @@ Everything else is **blocked by default**.
 
 ## Configuration
 
-Config files are stored outside the project directory (in `~/.config/opencode-sandbox/`) so that sandboxed commands cannot modify them. This prevents indirect prompt injection from weakening the sandbox by overwriting the config.
+Config is read when the plugin loads. The plugin uses the first matching source
+below; files are not merged, and built-in defaults fill omitted keys. Prefer a
+global file when config integrity matters: sandboxed commands can write to the
+project directory, including `.opencode/sandbox.json`.
 
 ### Config file locations
 
@@ -213,16 +217,14 @@ The plugin searches for configuration in this order (first match wins):
 
 The `<project-name>` is the basename of the project directory (e.g., `my-app` for `/home/user/projects/my-app`).
 
-If `XDG_CONFIG_HOME` is set, it is used instead of `~/.config`. Files are not
-merged: the first matching source is the whole user config, and built-in
-defaults fill any keys it omits.
+If `XDG_CONFIG_HOME` is set, it is used instead of `~/.config`.
 
 ### Config reference
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `disabled` | boolean | `false` | Disable the plugin for this project. |
-| `environment` | Record<string, string> | `{}` | Extra environment variables for every sandboxed command. Values are literal (no `~` or `$VAR` expansion); use absolute paths. |
+| `environment` | Record<string, string> | `{}` | OpenCode V2 only. Extra environment variables for every command the plugin handles. Values are literal (no `~` or `$VAR` expansion); use absolute paths. |
 | `filesystem.denyRead` | string[] | credential paths (`~/.ssh`, `~/.gnupg`, …) | Paths hidden from the sandbox (tmpfs or `/dev/null` mask). |
 | `filesystem.allowRead` | string[] | `[]` | Re-allow paths inside a denied path; takes precedence over `denyRead`. |
 | `filesystem.allowWrite` | string[] | project directory, worktree, temp dir | Writable paths; relative entries resolve against the project. |
@@ -241,7 +243,7 @@ appended to whatever `denyRead` list is active.
 ### Example: Global config
 
 ```json
-// ~/.config/opencode-sandbox/config.json
+// ~/.config/opencode/sandbox.json
 {
   "mode": "enforce",
   "filesystem": {
@@ -302,8 +304,8 @@ It is Linux-only and opt-in; the default is no extra devices beyond the minimal
 > **Scope:** the example below uses the *global* config, so it enables GPU
 > access for every project. Prefer a per-project file for GPU work: config
 > lookup is first-match-wins and does not merge, so
-> `~/.config/opencode/projects/<project>.sandbox.json` replaces the global file
-> for that project (built-in defaults still fill omitted keys).
+> `~/.config/opencode-sandbox/projects/<project-name>.json` replaces the global
+> file for that project (built-in defaults still fill omitted keys).
 
 For example, to give the sandboxed agent access to an NVIDIA GPU:
 
@@ -323,7 +325,7 @@ The same settings in a per-project file keep GPU access out of every other
 project:
 
 ```json
-// ~/.config/opencode/projects/my-gpu-app.sandbox.json
+// ~/.config/opencode-sandbox/projects/my-gpu-app.json
 {
   "filesystem": {
     "allowDevices": ["/dev/nvidiactl", "/dev/nvidia0", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia-modeset"]
@@ -335,7 +337,7 @@ project:
 ```
 
 `<project-name>` is the basename of the project directory, so
-`/home/user/projects/my-gpu-app` uses `my-gpu-app.sandbox.json`.
+`/home/user/projects/my-gpu-app` uses `my-gpu-app.json`.
 
 Each path is mounted with bubblewrap's `--dev-bind-try` after the minimal `/dev`
 is set up, so the device appears at the same path inside the sandbox. Only
@@ -411,7 +413,7 @@ Path precedence is inherited from `@anthropic-ai/sandbox-runtime`:
 If your Git workflow needs to read a public key (for example `~/.ssh/id_ed25519.pub`) while keeping `~/.ssh` blocked by default, re-allow only that file:
 
 ```json
-// ~/.config/opencode-sandbox/config.json
+// ~/.config/opencode/sandbox.json
 {
   "filesystem": {
     "denyRead": [
@@ -552,6 +554,7 @@ bun test
 ### Verify the live plugin
 
 - Server log: a `loading plugin` line with this checkout's `dist/v2.js` (OpenCode V2) or `dist/index.js` (V1).
+- TUI: `⊙ sandbox: on` in the home and prompt footers (`off` when disabled).
 - Fail-closed check: writing to `$HOME` should fail with
   `Read-only file system`.
 - GPU: `nvidia-smi` inside an agent shell command, plus a CUDA workload (see
@@ -592,7 +595,7 @@ If an interrupted V2 shell's exit cannot be confirmed, the plugin defers mount-p
 
 ### TUI badge
 
-The package also exports a TUI part (`./tui`), which adds a `⊙ sandbox: on` badge to the home and prompt footers. It shows `⊙ sandbox: off` when the active config sets `disabled: true`, and is absent when `OPENCODE_DISABLE_SANDBOX` is set. The badge reflects config at plugin load; saving a config change reloads the plugin.
+The package also exports a TUI part (`./tui`), which adds a `⊙ sandbox: on` badge to the home and prompt footers. It shows `⊙ sandbox: off` when the active config sets `disabled: true`, and is absent when `OPENCODE_DISABLE_SANDBOX` is set. The badge reflects the config at plugin load.
 
 In OpenCode V1:
 
